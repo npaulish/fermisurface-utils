@@ -6,6 +6,7 @@ from numpy.typing import NDArray
 import numpy as np
 from ifermi.surface import FermiSurface
 from pymatgen.electronic_structure.core import Spin
+from pymatgen.core.structure import Structure
 
 
 def _periodic_copy_kdtree_vertices(
@@ -49,11 +50,14 @@ def _periodic_copy_kdtree_vertices(
 
 def points_in_first_bz(
     points: NDArray[np.float64],
-    hull: ConvexHull,
+    structure: Structure,
     atol: float = 1e-8,
 ) -> NDArray[np.bool_]:
     # hull.equations: a*x + b <= 0 for points inside the convex hull
-    return np.all(hull.equations[:, :-1] @ points.T + hull.equations[:, -1][:, None] <= atol, axis=0)
+    bz_facets = structure.lattice.reciprocal_lattice.get_wigner_seitz_cell()
+    bz_vertices = np.unique(np.vstack(bz_facets), axis=0)
+    bz_hull = ConvexHull(bz_vertices)
+    return np.all(bz_hull.equations[:, :-1] @ points.T + bz_hull.equations[:, -1][:, None] <= atol, axis=0)
 
 def find_periodic_copy_groups(
         fs: FermiSurface,
