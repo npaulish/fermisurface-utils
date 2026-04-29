@@ -7,14 +7,19 @@ name = "fermisurface-utils"
 version = "0.1.0"
 description = "Utilities for Fermi surface analysis"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
+dependencies = [
+    "ifermi",
+    "numpy",
+    "pymatgen",
+    "scipy",
+]
 authors = [
     {name = "Nataliya Paulish", email = "nataliya.paulish@psi.ch"}
 ]
 license = {text = "MIT"}
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

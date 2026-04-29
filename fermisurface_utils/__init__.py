@@ -3,5 +3,6 @@
 __version__ = "0.1.0"
 __author__ = "npaulish"
 
-# Import main utilities here as needed
-# from .module import function
+from .periodic import find_periodic_copy_groups, _periodic_copy_kdtree_vertices
+
+__all__ = ["find_periodic_copy_groups"]
