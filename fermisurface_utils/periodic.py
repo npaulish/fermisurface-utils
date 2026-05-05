@@ -59,6 +59,50 @@ def points_in_first_bz(
     bz_hull = ConvexHull(bz_vertices)
     return np.all(bz_hull.equations[:, :-1] @ points.T + bz_hull.equations[:, -1][:, None] <= atol, axis=0)
 
+
+def supercell_fractional_bounds(
+    kpoints: NDArray[np.float64],
+    supercell_pad: float = 1.0,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return lower/upper fractional bounds of an expanded supercell mesh.
+
+    Args:
+        kpoints: Fractional k-points used for the original (unexpanded) mesh.
+        supercell_pad: Expansion amount applied on each side in fractional units.
+
+    Returns:
+        (bounds_min, bounds_max), each shape (3,).
+    """
+    bounds_min = np.min(kpoints, axis=0) - supercell_pad
+    bounds_max = np.max(kpoints, axis=0) + supercell_pad
+    return bounds_min, bounds_max
+
+
+def surface_touches_supercell_boundary(
+    vertices: NDArray[np.float64],
+    reciprocal_lattice: NDArray[np.float64],
+    bounds_min: NDArray[np.float64],
+    bounds_max: NDArray[np.float64],
+    atol: float = 1e-6,
+) -> bool:
+    """Check whether any isosurface vertex touches supercell outer bounds.
+
+    Args:
+        vertices: Isosurface vertices in reciprocal-cartesian coordinates.
+        reciprocal_lattice: Reciprocal lattice matrix used to convert to fractional.
+        bounds_min: Lower fractional bound of the expanded supercell.
+        bounds_max: Upper fractional bound of the expanded supercell.
+        atol: Absolute tolerance for boundary matching.
+
+    Returns:
+        True if any vertex is on any outer supercell boundary plane.
+    """
+    reciprocal_lattice_inv = np.linalg.inv(reciprocal_lattice)
+    frac_vertices = vertices @ reciprocal_lattice_inv
+    touches_min = np.isclose(frac_vertices, bounds_min[None, :], atol=atol)
+    touches_max = np.isclose(frac_vertices, bounds_max[None, :], atol=atol)
+    return bool(np.any(touches_min | touches_max))
+
 def find_periodic_copy_groups(
         fs: FermiSurface,
         spin: Spin,
@@ -143,3 +187,72 @@ def find_periodic_copy_groups(
     groups = sorted(groups, key=lambda g: (max(areas[idx] for idx in g), len(g)), reverse=True)
 
     return groups, pair_matches
+
+
+def find_unique_surfaces(
+    fs: FermiSurface,
+    spin: Spin,
+    structure: Structure,
+    kpoints: Optional[NDArray[np.float64]] = None,
+    discard_boundary_touching: bool = False,
+    boundary_atol: float = 1e-6,
+    atol: float = 2e-5,
+    shift_tol: float = 1e-6,
+    area_rtol: float = 1e-6,
+) -> tuple[list[Any], list[int], list[int]]:
+    """Select one representative surface per periodic-copy group.
+
+    The representative is chosen from each periodic-copy group by preferring the
+    surface with the most vertices inside the first Brillouin zone, then the
+    largest area.
+
+    If ``discard_boundary_touching`` is True, candidates touching the outer
+    supercell boundary are skipped before selection.
+    """
+    groups, _ = find_periodic_copy_groups(
+        fs,
+        spin=spin,
+        structure=structure,
+        atol=atol,
+        shift_tol=shift_tol,
+        area_rtol=area_rtol,
+    )
+
+    surfaces = fs.isosurfaces[spin]
+    bounds_min = bounds_max = None
+    reciprocal_lattice = None
+    if discard_boundary_touching:
+        if kpoints is None:
+            raise ValueError("kpoints is required when discard_boundary_touching=True")
+        bounds_min, bounds_max = supercell_fractional_bounds(kpoints, supercell_pad=1.0)
+        reciprocal_lattice = structure.lattice.reciprocal_lattice.matrix
+
+    unique_surfaces = []
+    unique_indices = []
+    discarded_boundary_indices = []
+
+    for group in groups:
+        candidates = []
+        for idx in group:
+            surface = surfaces[idx]
+            if discard_boundary_touching and surface_touches_supercell_boundary(
+                surface.vertices,
+                reciprocal_lattice,
+                bounds_min,
+                bounds_max,
+                atol=boundary_atol,
+            ):
+                discarded_boundary_indices.append(idx)
+                continue
+
+            inside_mask = points_in_first_bz(surface.vertices, structure)
+            n_inside = int(inside_mask.sum())
+            if n_inside > 0:
+                candidates.append((n_inside, surface.area, idx, surface))
+
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            unique_surfaces.append(candidates[0][3])
+            unique_indices.append(candidates[0][2])
+
+    return unique_surfaces, unique_indices, sorted(set(discarded_boundary_indices))
