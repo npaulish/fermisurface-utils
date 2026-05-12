@@ -3,7 +3,7 @@
 __version__ = "0.1.0"
 __author__ = "npaulish"
 
-from .bxsf import read_bxsf, write_bxsf
+from .bxsf import read_bxsf, write_bxsf, fermi_surface_from_bxsf
 from .periodic import (
 	find_periodic_copy_groups,
 	find_unique_surfaces,
@@ -16,6 +16,7 @@ from .periodic import (
 __all__ = [
 	"read_bxsf",
 	"write_bxsf",
+	"fermi_surface_from_bxsf",
 	"find_periodic_copy_groups",
 	"find_unique_surfaces",
 	"points_in_first_bz",

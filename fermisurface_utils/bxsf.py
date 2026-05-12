@@ -100,6 +100,66 @@ def read_bxsf(filename):
         return fermi_energy, origin, span_vectors, X, Y, Z, E
 
 
+def fermi_surface_from_bxsf(
+    bxsf_path: str,
+    structure,
+    mu: float = 0.0,
+    wigner_seitz: bool = True,
+    supercell_dim: tuple = (3, 3, 3),
+    calculate_dimensionality: bool = False,
+    trim_to_first_bz: bool = False,
+):
+    """Create a FermiSurface from a BXSF file and a pymatgen Structure.
+
+    Kpoints are shifted from [0, 1) to [-0.5, 0.5) so the expanded supercell
+    is centered on Γ.  This prevents marching cubes from cutting pockets that
+    sit at BZ corners (which happens for non-orthogonal lattices where the
+    WS cell extends to b_frac = ±1).
+
+    Args:
+        bxsf_path: Path to the .bxsf file.
+        structure: pymatgen Structure for the material.
+        mu: Energy offset from the Fermi level for the isosurface.
+        wigner_seitz: Use the Wigner-Seitz cell (first BZ) as the bounding cell.
+        supercell_dim: Supercell dimensions used by ifermi for band expansion.
+        calculate_dimensionality: Whether to compute isosurface dimensionality.
+        trim_to_first_bz: Trim the Fermi surface to the first Brillouin zone.
+
+    Returns:
+        (fs, kpoints): FermiSurface object and fractional kpoints in [-0.5, 0.5),
+        suitable for passing to ``find_unique_surfaces``.
+    """
+    from ifermi.kpoints import kpoints_to_first_bz
+    from ifermi.surface import FermiSurface
+    from pymatgen.core import Lattice
+    from pymatgen.electronic_structure.bandstructure import BandStructure
+    from pymatgen.electronic_structure.core import Spin
+
+    fermi_energy, _origin, span_vectors, X, Y, Z, E = read_bxsf(bxsf_path)
+
+    # Drop the last k-point along each axis (periodic duplicate required by BXSF)
+    E_trimmed = E[:, :-1, :-1, :-1]
+    nx, ny, nz = E_trimmed.shape[1:]
+
+    xi, yi, zi = np.meshgrid(X[:nx], Y[:ny], Z[:nz], indexing="ij")
+    kpoints = np.stack([xi.ravel(), yi.ravel(), zi.ravel()], axis=1)
+    eigenvalues = {Spin.up: E_trimmed.reshape(len(E_trimmed), -1)}
+
+    kpoints = kpoints_to_first_bz(kpoints)
+
+    lattice = Lattice(span_vectors)
+    bandstructure = BandStructure(kpoints, eigenvalues, lattice, fermi_energy, structure=structure)
+    fs = FermiSurface.from_band_structure(
+        bandstructure,
+        mu=mu,
+        wigner_seitz=wigner_seitz,
+        supercell_dim=supercell_dim,
+        calculate_dimensionality=calculate_dimensionality,
+        trim_to_first_bz=trim_to_first_bz,
+    )
+    return fs, kpoints
+
+
 def write_bxsf(filename: str, fermi_energy: float, origin, span_vectors, E):
     """Write a .bxsf file.
 
