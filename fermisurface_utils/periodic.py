@@ -9,6 +9,22 @@ from pymatgen.electronic_structure.core import Spin
 from pymatgen.core.structure import Structure
 
 
+def _boundary_vertices_on_bz_face(
+    vertices_cart: NDArray[np.float64],
+    bz_hull: ConvexHull,
+    atol: float = 0.02,
+) -> NDArray[np.bool_]:
+    """Return True for each vertex within ``atol`` (Å⁻¹) of any BZ hull face.
+
+    The ConvexHull face equation is  n·x + offset = 0  on the face, negative
+    inside, positive outside.  A vertex is "on" a face when its signed distance
+    is near zero (|dist| < atol), not simply positive (which would also match
+    vertices far outside the BZ).
+    """
+    dist = bz_hull.equations[:, :-1] @ vertices_cart.T + bz_hull.equations[:, -1, None]
+    return np.any(np.abs(dist) < atol, axis=0)
+
+
 def _periodic_copy_kdtree_vertices(
         va: NDArray[np.float64],
         vb: NDArray[np.float64],
@@ -102,6 +118,47 @@ def surface_touches_supercell_boundary(
     touches_min = np.isclose(frac_vertices, bounds_min[None, :], atol=atol)
     touches_max = np.isclose(frac_vertices, bounds_max[None, :], atol=atol)
     return bool(np.any(touches_min | touches_max))
+
+
+def surface_touches_non_bz_boundary(
+    vertices: NDArray[np.float64],
+    reciprocal_lattice: NDArray[np.float64],
+    bounds_min: NDArray[np.float64],
+    bounds_max: NDArray[np.float64],
+    bz_hull: ConvexHull,
+    atol: float = 1e-6,
+    bz_atol: float = 0.02,
+) -> bool:
+    """Check if a surface touches the supercell boundary at a location NOT on the BZ hull.
+
+    A surface whose boundary-touching vertices all lie on a BZ face is a legitimate
+    BZ-boundary pocket — closed in the reduced-zone picture — and should not be
+    treated as a supercell artifact.
+
+    Args:
+        vertices: Isosurface vertices in reciprocal-Cartesian coordinates.
+        reciprocal_lattice: Matrix whose rows are the primitive reciprocal lattice vectors.
+        bounds_min: Lower fractional bounds of the expanded supercell.
+        bounds_max: Upper fractional bounds of the expanded supercell.
+        bz_hull: ConvexHull of the first Brillouin zone vertices (Cartesian).
+        atol: Tolerance for identifying vertices on the supercell boundary.
+        bz_atol: Tolerance (Å⁻¹) for deciding whether a vertex lies on a BZ face.
+
+    Returns:
+        True only when at least one boundary vertex is NOT on any BZ hull face.
+    """
+    reciprocal_lattice_inv = np.linalg.inv(reciprocal_lattice)
+    frac_vertices = vertices @ reciprocal_lattice_inv
+    touches_min = np.isclose(frac_vertices, bounds_min[None, :], atol=atol)
+    touches_max = np.isclose(frac_vertices, bounds_max[None, :], atol=atol)
+    boundary_mask = np.any(touches_min | touches_max, axis=1)
+
+    if not boundary_mask.any():
+        return False  # does not touch any supercell boundary
+
+    on_bz = _boundary_vertices_on_bz_face(vertices[boundary_mask], bz_hull, atol=bz_atol)
+    return bool(not on_bz.all())
+
 
 def find_periodic_copy_groups(
         fs: FermiSurface,
@@ -206,8 +263,12 @@ def find_unique_surfaces(
     surface with the most vertices inside the first Brillouin zone, then the
     largest area.
 
-    If ``discard_boundary_touching`` is True, candidates touching the outer
-    supercell boundary are skipped before selection.
+    If ``discard_boundary_touching`` is True, candidates that touch the outer
+    supercell boundary are skipped in the first pass.  If *all* copies in a
+    group touch the boundary (which happens for pockets near non-orthogonal BZ
+    corners when the supercell wall coincides with the BZ vertex), a second
+    pass selects the best boundary-touching candidate that still has vertices
+    inside the first BZ, rather than silently dropping the pocket.
     """
     groups, _ = find_periodic_copy_groups(
         fs,
@@ -232,27 +293,50 @@ def find_unique_surfaces(
     discarded_boundary_indices = []
 
     for group in groups:
-        candidates = []
+        clean_candidates: list[tuple[int, float, int, Any]] = []
+        boundary_candidates: list[tuple[int, float, int, Any]] = []
+
         for idx in group:
             surface = surfaces[idx]
-            if discard_boundary_touching and surface_touches_supercell_boundary(
+            is_boundary = discard_boundary_touching and surface_touches_supercell_boundary(
                 surface.vertices,
                 reciprocal_lattice,
                 bounds_min,
                 bounds_max,
                 atol=boundary_atol,
-            ):
-                discarded_boundary_indices.append(idx)
-                continue
+            )
 
             inside_mask = points_in_first_bz(surface.vertices, structure)
             n_inside = int(inside_mask.sum())
-            if n_inside > 0:
-                candidates.append((n_inside, surface.area, idx, surface))
+
+            if is_boundary:
+                discarded_boundary_indices.append(idx)
+                if n_inside > 0:
+                    boundary_candidates.append((n_inside, surface.area, idx, surface))
+            else:
+                if n_inside > 0:
+                    clean_candidates.append((n_inside, surface.area, idx, surface))
+
+        # Prefer a clean (non-boundary) candidate.
+        # Fall back to the best boundary-touching candidate only when the group
+        # has multiple members (periodic copies) that ALL touch the boundary.
+        # This covers non-orthogonal-lattice pockets whose BZ corner coincides
+        # with the supercell wall but NOT large quasi-2D sheets, which are
+        # typically singleton groups with no clean periodic copies.
+        if clean_candidates:
+            candidates = clean_candidates
+        elif boundary_candidates and len(group) > 1:
+            candidates = boundary_candidates
+        else:
+            candidates = []
 
         if candidates:
             candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-            unique_surfaces.append(candidates[0][3])
-            unique_indices.append(candidates[0][2])
+            chosen = candidates[0]
+            unique_surfaces.append(chosen[3])
+            unique_indices.append(chosen[2])
+            # If we fell back to a boundary candidate, remove it from discarded
+            if not clean_candidates:
+                discarded_boundary_indices.remove(chosen[2])
 
     return unique_surfaces, unique_indices, sorted(set(discarded_boundary_indices))

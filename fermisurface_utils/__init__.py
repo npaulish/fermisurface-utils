@@ -10,6 +10,7 @@ from .periodic import (
 	points_in_first_bz,
 	supercell_fractional_bounds,
 	surface_touches_supercell_boundary,
+	surface_touches_non_bz_boundary,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
 	"points_in_first_bz",
 	"supercell_fractional_bounds",
 	"surface_touches_supercell_boundary",
+	"surface_touches_non_bz_boundary",
 ]
