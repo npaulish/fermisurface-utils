@@ -12,6 +12,14 @@ Grid convention (from Wannier90 / XCrysDen spec):
 import numpy as np
 
 
+class TruncatedBxsfError(ValueError):
+    """A .bxsf file ends before the grid its header declares.
+
+    Subclasses ValueError so existing callers that guard against malformed
+    input keep working.
+    """
+
+
 def read_bxsf(filename):
     """Read a .bxsf file.
 
@@ -74,17 +82,32 @@ def read_bxsf(filename):
 
                 E = np.zeros((n_bands, n_x, n_y, n_z))
 
+                n_grid = n_x * n_y * n_z
                 for ib in range(n_bands):
-                    line = io.readline().strip()
+                    raw = io.readline()
+                    if not raw:
+                        raise TruncatedBxsfError(
+                            f"file ends after {ib} of {n_bands} bands"
+                        )
+                    line = raw.strip()
                     assert line == f"BAND: {ib + 1}"
                     idx = 0
                     Eib = []
-                    while idx < n_x * n_y * n_z:
-                        line = io.readline().strip().split()
+                    while idx < n_grid:
+                        raw = io.readline()
+                        if not raw:
+                            # EOF mid-band. Without this check `readline` keeps returning
+                            # '' forever, `ncol` stays 0 and this loop spins at 100% CPU
+                            # for as long as the process is allowed to live.
+                            raise TruncatedBxsfError(
+                                f"file ends mid-grid: band {ib + 1} of {n_bands} has "
+                                f"{idx} of {n_grid} values"
+                            )
+                        line = raw.strip().split()
                         ncol = len(line)
                         Eib += list(map(float, line))
                         idx += ncol
-                    assert idx == n_x * n_y * n_z
+                    assert idx == n_grid
                     # NZ is fastest-varying (C order), matching the XCrysDen/Wannier90 convention
                     E[ib] = np.reshape(Eib, (n_x, n_y, n_z))
 
