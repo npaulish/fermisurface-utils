@@ -15,6 +15,7 @@ from scipy.optimize import brentq
 from scipy.special import erf
 
 from .bxsf import read_bxsf
+from .tetrahedron import compute_n_electrons_tetrahedron, sorted_tetrahedron_corners
 
 
 class FermiEnergyNotFoundError(RuntimeError):
@@ -91,37 +92,22 @@ def compute_n_electrons(
     return float(np.sum(np.asarray(kweights)[:, None] * occ))
 
 
-def compute_fermi_energy(
-    eigenvalues: np.ndarray,
-    num_electrons: float,
-    kBT: float = 0.0,
-    smearing: str = "none",
-    prefactor: float = 2,
-    kweights: ty.Optional[np.ndarray] = None,
-    tol_n_electrons: float = 1e-6,
+def _bisect_fermi_energy(
+    excess: ty.Callable[[float], float],
+    min_e: float,
+    max_e: float,
+    tol_n_electrons: float,
 ) -> ty.Tuple[float, float]:
-    """Find the Fermi energy for which the occupied states sum to ``num_electrons``.
+    """Bracket-and-bisect ``excess`` (occupied electrons minus target) for its root.
 
-    The Fermi energy is bracketed between the min/max eigenvalues and located
-    with Brent's method. If the achieved electron count is not within
-    ``tol_n_electrons``, the tolerance is doubled and re-checked, up to
-    ``max(1e-3, tol_n_electrons)``, mirroring the retry logic in
-    ``compute_Fermi.jl`` (needed there because of the coarser tolerance used
-    by Roots.jl's plain bisection; kept here for parity even though
+    If the achieved electron count is not within ``tol_n_electrons``, the tolerance
+    is doubled and re-checked, up to ``max(1e-3, tol_n_electrons)``, mirroring the
+    retry logic in ``compute_Fermi.jl`` (needed there because of the coarser
+    tolerance used by Roots.jl's plain bisection; kept here for parity even though
     ``scipy.optimize.brentq`` converges to a much tighter tolerance already).
 
     :return: ``(fermi_energy, tol_n_electrons_used)``.
     """
-    eigenvalues = np.asarray(eigenvalues)
-
-    def excess(fermi_energy):
-        return (
-            compute_n_electrons(eigenvalues, fermi_energy, kBT, smearing, prefactor, kweights)
-            - num_electrons
-        )
-
-    min_e = eigenvalues.min() - 1
-    max_e = eigenvalues.max() + 1
     excess_min, excess_max = excess(min_e), excess(max_e)
     if not excess_min <= 0 <= excess_max:
         raise FermiEnergyNotFoundError(
@@ -143,6 +129,67 @@ def compute_fermi_energy(
             )
 
     return fermi_energy, tol
+
+
+def compute_fermi_energy(
+    eigenvalues: np.ndarray,
+    num_electrons: float,
+    kBT: float = 0.0,
+    smearing: str = "none",
+    prefactor: float = 2,
+    kweights: ty.Optional[np.ndarray] = None,
+    tol_n_electrons: float = 1e-6,
+) -> ty.Tuple[float, float]:
+    """Find the Fermi energy for which the occupied states sum to ``num_electrons``.
+
+    The Fermi energy is bracketed between the min/max eigenvalues and located
+    with Brent's method. See :func:`_bisect_fermi_energy` for the tolerance
+    retry behaviour.
+
+    :return: ``(fermi_energy, tol_n_electrons_used)``.
+    """
+    eigenvalues = np.asarray(eigenvalues)
+
+    def excess(fermi_energy):
+        return (
+            compute_n_electrons(eigenvalues, fermi_energy, kBT, smearing, prefactor, kweights)
+            - num_electrons
+        )
+
+    min_e = eigenvalues.min() - 1
+    max_e = eigenvalues.max() + 1
+    return _bisect_fermi_energy(excess, min_e, max_e, tol_n_electrons)
+
+
+def compute_fermi_energy_tetrahedron(
+    eigenvalues: np.ndarray,
+    span_vectors: np.ndarray,
+    num_electrons: float,
+    prefactor: float = 2,
+    tol_n_electrons: float = 1e-6,
+) -> ty.Tuple[float, float]:
+    """Find the Fermi energy with the linear tetrahedron method (Lehmann & Taut).
+
+    Unlike :func:`compute_fermi_energy`, this integrates over the grid geometry
+    (each cell split into 6 tetrahedra) rather than smearing each k-point
+    independently, so no smearing width is needed. See
+    :mod:`fermisurface_utils.tetrahedron` for the integration scheme.
+
+    :param eigenvalues: eigenvalues in eV, shape ``(n_bands, nx, ny, nz)``, on a
+        periodic grid (no duplicated boundary point).
+    :param span_vectors: reciprocal lattice vectors as columns, shape ``(3, 3)``
+        (same convention as :func:`fermisurface_utils.bxsf.read_bxsf`).
+    :return: ``(fermi_energy, tol_n_electrons_used)``.
+    """
+    eigenvalues = np.asarray(eigenvalues)
+    sorted_corners = sorted_tetrahedron_corners(eigenvalues, span_vectors)
+
+    def excess(fermi_energy):
+        return compute_n_electrons_tetrahedron(sorted_corners, fermi_energy, prefactor) - num_electrons
+
+    min_e = eigenvalues.min() - 1
+    max_e = eigenvalues.max() + 1
+    return _bisect_fermi_energy(excess, min_e, max_e, tol_n_electrons)
 
 
 @dataclass
@@ -176,17 +223,27 @@ def compute_fermi_energy_from_bxsf(
     computed Fermi energy is biased (band min/max, used for
     ``bands_crossing_fermi``, are unaffected by the duplicates so the full
     grid is used for those).
+
+    ``smearing="tetrahedron"`` uses the linear tetrahedron method (see
+    :func:`compute_fermi_energy_tetrahedron`) instead of pointwise smearing;
+    ``kBT`` is ignored in that case.
     """
-    _fermi_energy_bxsf, _origin, _span_vectors, _X, _Y, _Z, E = read_bxsf(bxsf_path)
+    _fermi_energy_bxsf, _origin, span_vectors, _X, _Y, _Z, E = read_bxsf(bxsf_path)
 
     n_bands, n_x, n_y, n_z = E.shape
-    eigenvalues = E[:, :-1, :-1, :-1].reshape(n_bands, -1).T
+    E_trimmed = E[:, :-1, :-1, :-1]
 
-    fermi_energy, tol_used = compute_fermi_energy(
-        eigenvalues, num_electrons, kBT, smearing, prefactor, tol_n_electrons=tol_n_electrons
-    )
+    if smearing == "tetrahedron":
+        fermi_energy, tol_used = compute_fermi_energy_tetrahedron(
+            E_trimmed, span_vectors, num_electrons, prefactor, tol_n_electrons=tol_n_electrons
+        )
+    else:
+        eigenvalues = E_trimmed.reshape(n_bands, -1).T
+        fermi_energy, tol_used = compute_fermi_energy(
+            eigenvalues, num_electrons, kBT, smearing, prefactor, tol_n_electrons=tol_n_electrons
+        )
 
-    flat = eigenvalues.ravel()
+    flat = E_trimmed.ravel()
     below = flat[flat < fermi_energy]
     above = flat[flat > fermi_energy]
     if below.size == 0 or above.size == 0:

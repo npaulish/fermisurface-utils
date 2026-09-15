@@ -10,6 +10,7 @@ from .fermi import (
 	occupation,
 	compute_n_electrons,
 	compute_fermi_energy,
+	compute_fermi_energy_tetrahedron,
 	compute_fermi_energy_from_bxsf,
 )
 from .periodic import (
@@ -30,6 +31,7 @@ __all__ = [
 	"occupation",
 	"compute_n_electrons",
 	"compute_fermi_energy",
+	"compute_fermi_energy_tetrahedron",
 	"compute_fermi_energy_from_bxsf",
 	"find_periodic_copy_groups",
 	"find_unique_surfaces",
