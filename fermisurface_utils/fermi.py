@@ -121,12 +121,17 @@ def _bisect_fermi_energy(
     tol_upperbound = max(1e-3, tol_n_electrons)
     tol = tol_n_electrons
     while residual > tol:
-        tol *= 2
-        if tol > tol_upperbound:
+        # Clamp to the bound instead of overshooting it. Doubling alone can only test
+        # tolerances on the ladder 1e-6, 2e-6, ... 5.12e-4, 1.024e-3, so the rung after
+        # 5.12e-4 already exceeds the 1e-3 bound and the loop used to raise before it
+        # could re-test. That made the effective tolerance 5.12e-4 rather than the 1e-3
+        # advertised, rejecting residuals that are in fact within bounds.
+        if tol >= tol_upperbound:
             raise FermiEnergyNotFoundError(
                 f"Failed to find Fermi energy within tolerance: residual={residual}, "
                 f"tol_n_electrons_upperbound={tol_upperbound}"
             )
+        tol = min(tol * 2, tol_upperbound)
 
     return fermi_energy, tol
 
